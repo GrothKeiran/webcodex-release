@@ -150,6 +150,22 @@ For normal human operation, prefer `release_operator.py doctor` before the relea
 
 The lower-level topology deliberately separates roles. The release control host first runs `release_operator.py preflight` against the exact source ref/SHA, then GitHub Actions validates that pre-tag source in the durable readiness workflow. After explicit authorization creates the immutable tag, the tag becomes the release source authority: `release_operator.py build-start` / `build-status` bind one durable `rb_*` request to `release-build.yml` dispatched from that exact tag. `main` and the release branch may advance after tagging without invalidating the build or publication plan. The workflow always builds the six native runtime archives from the exact tag. For `v0.4.3+`, its primary same-run bundle contains the macOS Apple-Silicon and Windows x64/ARM64 Desktop distributions; the historical `v0.4.2`-and-earlier contract retains macOS Intel in that bundle. The macOS Apple-Silicon lane reuses its already-built runtime as the Desktop input and records post-signing evidence. The current public macOS distribution contract intentionally uses ad-hoc signing for the Desktop app, bundled Runner, DMG, and unified macOS payloads, matching the long-running dogfood path and requiring no Apple release credentials or notarization. Stable bundle identifiers, Runner identifier `dev.webcodex.runner`, TCC usage descriptions, native identity smoke, and exact-source evidence remain required. Developer ID/notarization is a future distribution-mode migration and must be introduced explicitly with credentials and clean-machine acceptance rather than becoming an implicit release prerequisite.
 
+New high-level release plans use schema 3 and persist
+`require_unified_installers=true`. It is a caller-owned delivery requirement,
+not an inference from whichever assets happen to remain in a bundle. Collection,
+existing-bundle reconciliation, npm staging and draft verification all enforce the
+eight installer targets, six source manifests and checksummed public `manifest.json`.
+The native workflow uses an explicit Cargo target directory before Desktop
+compilation and verifies the complete unified bundle before uploading it. Public
+verification remains a separate final gate and must use
+`python3 scripts/verify_public_release.py <VERSION> --require-unified-installers`
+for these plans. Existing schema 1/2 plans migrate with the legacy requirement
+set to false; low-level historical verification retains its default compatibility.
+Current low-level `collect`, `stage-npm`, `verify-draft` and metadata commands
+must pass `--require-unified-installers` when used outside a new plan for a
+supported unified delivery. Do not infer this requirement from a version threshold
+or modify already published legacy releases.
+
 The release control host collects the exact primary bundle with `release_operator.py collect` (locked run id, source SHA, and tag; GitHub artifact REST download, no `gh run download`) and stages npm from the retained runtime bytes without Cargo. Draft verification compares GitHub-provided asset digests and sizes against those retained bytes. Creating the immutable tag, making the GitHub Release public, and `npm publish` remain explicit human-authorized steps.
 
 Publishing a `v0.4.3+` GitHub Release independently activates two post-publication adapters. `release-image.yml` publishes/reconciles the server-only multi-arch GHCR image and its digest-pinned bootstrap assets. `release-desktop-darwin-x64.yml` runs on the native Intel runner, downloads and verifies the already-published immutable `darwin-x64` runtime archive against the primary `SHA256SUMS`, and attaches the reconciled ad-hoc-signed DMG plus its dedicated `.sha256` sidecar to the same Release. It never rewrites the primary `SHA256SUMS`. Reruns treat an already-published DMG as immutable authority, verify any existing checksum against those bytes, and may derive only a missing checksum from the existing DMG. An orphan checksum without its DMG or duplicate/conflicting assets fail closed instead of replacing published bytes. The Intel Desktop adapter is intentionally outside the primary Release critical path and can also be manually backfilled from reviewed `main` for the exact public tag.
