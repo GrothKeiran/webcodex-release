@@ -723,15 +723,19 @@ A fact should remain Skill/model-owned when it is:
 This keeps the Runtime authoritative about source facts while allowing Skills to evolve
 quickly as model ergonomics change.
 
-## Exit criteria for this branch
+## Current experiment-harness boundary
 
-This design branch is complete when:
+P0-P3 are now allowed on this branch as experiment-only material:
 
-- the experiment design is reviewed for authority/freshness mistakes;
-- no Runtime source code is changed;
-- the branch contains no POC Skill implementation or benchmark result presented as
-  already measured;
-- the next coding task can implement P0-P3 without reopening the product boundary.
+- the Skill template lives outside `.agents/skills`, so checkout alone does not enable
+  the treatment;
+- benchmark prompts/rubrics and bounded validation/report helpers may live under
+  `scripts/experiments/project_understanding/`;
+- the configured live Skill copy used by treatment must still live outside the subject
+  checkout;
+- no Runtime source/schema/tool behavior changes are part of P0-P3;
+- no benchmark result is presented as measured until a real fresh-window run occurs.
 
-The immediate next action after review is **P0-P3 only**. Do not implement a Runner
-knowledge graph until real A/B evidence crosses the promotion gate.
+The next experimental action is **Stage 1 T1 control**, followed by the matching T1
+treatment on the same frozen Project/HEAD. Do not implement a Runner knowledge graph
+until real A/B evidence crosses the promotion gate.

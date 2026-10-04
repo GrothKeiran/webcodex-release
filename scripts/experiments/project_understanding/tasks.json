@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "suite": "project-understanding-poc",
+  "rules": {
+    "samePromptBytesAcrossConditions": true,
+    "freshWindow": true,
+    "freshWorkflowSession": true,
+    "noUserHintsAfterStart": true,
+    "qualityScale": {
+      "0": "incorrect",
+      "1": "partial",
+      "2": "correct"
+    },
+    "hardFailure": [
+      "material authority/lifecycle error",
+      "fabricated primary file or symbol",
+      "stale snapshot presented as live truth"
+    ]
+  },
+  "conditionOrderPilot": [
+    {
+      "task": "T1",
+      "first": "control",
+      "second": "treatment"
+    },
+    {
+      "task": "T2",
+      "first": "treatment",
+      "second": "control"
+    },
+    {
+      "task": "T3",
+      "first": "control",
+      "second": "treatment"
+    },
+    {
+      "task": "T4",
+      "first": "treatment",
+      "second": "control"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Trace a public inspection tool",
+      "prompt": "Trace `search_project_texts` from its public/model-facing contract through canonical ToolRuntime execution to Runner/search execution and model result projection. Identify the important bounds/concurrency decisions and the files that own them. Do not modify code. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "model-facing tool contract/registry",
+        "ToolRuntime search_project_texts execution",
+        "Runner/search execution boundary",
+        "bounded query/result behavior",
+        "concurrency decision/constant",
+        "model result projection"
+      ]
+    },
+    {
+      "id": "T2",
+      "title": "Explain continuity boundaries",
+      "prompt": "Explain the differences and allowed relationships between Workflow Session, ClientWindow, ActionAudit, Job, Goal, and durable Agent state. Identify the authoritative implementation/docs for each and call out at least three things that must never be inferred from another identity. Do not modify code. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "distinct lifecycles",
+        "no implicit Project/authority inference",
+        "Job != Workflow Session",
+        "Goal != Job/Session",
+        "ClientWindow is not authority"
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "Trace managed-worktree authority",
+      "prompt": "Trace `work_on_project(project, mode=worktree)` from source Project selection to managed worktree registration. Identify the authority/freshness fences and explain why the model cannot simply choose an arbitrary destination path. Do not modify code. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "source Project reauthorization",
+        "exact Git ref resolution",
+        "Runner-owned destination",
+        "allowed_roots",
+        "Project Registry registration"
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "Change-impact question",
+      "prompt": "Suppose we consider raising `MAX_SEARCH_PROJECT_TEXTS_CONCURRENCY` from 2 to 4. Identify the code, tests, documentation, resource-contention risks, and measurements that should be reviewed before making that change. Do not modify code. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "constant owner",
+        "tests",
+        "native batching",
+        "resource contention",
+        "result bounds",
+        "performance methodology"
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "New-maintainer reading tour",
+      "prompt": "Give a new maintainer a 10-minute reading order for understanding same-Job continuation: how a long-running validation/process becomes a durable Job, how it is observed without redispatch, how Workflow Session evidence records it, and how the model receives the next action. Use concrete files and explain why each is in the sequence. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "promotion to Job",
+        "same Job observation",
+        "no redispatch",
+        "Workflow Session evidence",
+        "next action/recovery"
+      ]
+    },
+    {
+      "id": "T6",
+      "title": "Cross-layer review localization",
+      "prompt": "A proposed change claims that Project identity can be recovered from the current browser window whenever a model omits the Project field. Before reviewing a patch, identify the architecture/contracts that make this safe or unsafe and list the files you would inspect first. Do not modify code. In the final answer, include the exact WebCodex Workflow Session id used for this run.",
+      "requiredConcepts": [
+        "premise is unsafe",
+        "ClientWindow not Project authority",
+        "explicit Project authorization",
+        "session/transport boundary"
+      ]
+    }
+  ]
+}
