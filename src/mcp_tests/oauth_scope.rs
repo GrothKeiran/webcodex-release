@@ -1156,3 +1156,47 @@ async fn oauth_browser_scopes_challenge_and_pass_the_canonical_gate() {
         }
     }
 }
+
+#[tokio::test]
+async fn oauth_effective_admin_discovers_and_calls_trace_diagnostics() {
+    let config = test_config_oauth2(Some("secret"));
+    let (_tmp, db) = test_db();
+    let user = crate::test_support::seed_user_with_role(&db, "admin", "admin");
+    let client = seed_oauth_client(&db, &user);
+    let token = seed_oauth_access_token(&db, &client, &user, "runtime:read");
+    let runtime = test_runtime().with_window_activity_database(db.clone());
+    let service = Service::new(build_test_router(config, db, Arc::new(runtime)));
+    let (status, body, _) =
+        oauth_mcp_request(&service, &token, "tools/list", mcp_2026_params(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listed_tool_names(&body).contains("read_tool_trace"));
+    let (status, body, _) = oauth_mcp_request(
+        &service,
+        &token,
+        "tools/call",
+        mcp_2026_params(json!({
+            "name": "read_tool_manifest", "arguments": {"tool_name": "read_tool_trace"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], false);
+    assert_eq!(
+        body["result"]["structuredContent"]["output"]["name"],
+        "read_tool_trace"
+    );
+    for params in [
+        json!({"name": "read_tool_trace", "arguments": {}}),
+        adaptive_gateway_params("read_tool_trace", json!({})),
+    ] {
+        let (status, body, challenge) =
+            oauth_mcp_request(&service, &token, "tools/call", mcp_2026_params(params)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(challenge.is_none());
+        assert_eq!(body["result"]["isError"], false, "{body:?}");
+        assert!(
+            body["result"]["structuredContent"]["output"]["calls"].is_array(),
+            "{body:?}"
+        );
+    }
+}

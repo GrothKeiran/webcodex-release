@@ -417,7 +417,7 @@ Runner 继续使用原有 hosted credential，MCP client 获得独立 OAuth cred
 
 Browser Use 的 shared-key OAuth delegation 需要在 `connect --auth oauth` 时显式指定 `--oauth-browser-permissions`，仅追加 `browser:read`、`browser:control`、`browser:launch`。默认 baseline 不包含 Browser scope；Browser 与 `--oauth-computer-permissions` 相互独立，也不使用 Computer consent checkbox。已有 client 不会自动扩权，历史窄权限仅追加显式选择的类别。scope ceiling 变化会撤销旧 grants 并要求重新授权；复用已启用 Browser 的 profile 时必须继续携带该 flag。
 
-Operator/admin diagnostics（如 `read_tool_trace`）不属于普通 OAuth delegation。`admin` 不在 OAuth supported scopes 或 shared-key bridge ceiling 中。Manifest discovery 同时检查 caller authority 和 protocol capability；即使硬编码调用，权限拒绝也不会发出暗示可通过 OAuth reconnect 获得 `admin` 的 challenge。Browser 等可委托 scope 缺失时仍返回标准 `WWW-Authenticate: Bearer error="insufficient_scope"`。
+`admin` 仍不可通过普通 OAuth 请求或委托。仅当前 admin 用户本人拥有的 managed-user OAuth client 动态继承 first-party owner authority；旧 token 和 refresh rotation 无需重新授权，用户降级或 ownership 不再匹配后，下一次请求立即失去隐式 admin。shared-key / project-share OAuth 不适用。详见[鉴权模型](AUTH_MODEL.zh-CN.md#oauth2)。`read_tool_trace` 的发现和调用仍检查 caller authority 与 protocol capability；admin 权限拒绝不会提示通过 OAuth reconnect 提权，缺失可委托 scope 则仍返回标准 insufficient-scope challenge。
 
 只有明确需要 managed-user OAuth identity 时，才使用高级 `webcodex login` 流程，再执行 `webcodex connect ... --auth managed-oauth --oauth-redirect-uri ...`；`--user` 仅用于该模式。
 

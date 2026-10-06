@@ -6,7 +6,7 @@ use crate::{Config, Database};
 use salvo::prelude::async_trait;
 
 use super::pat::hash_token;
-use super::scopes::SCOPE_ACCOUNT_MANAGE;
+use super::scopes::{SCOPE_ACCOUNT_MANAGE, SCOPE_ADMIN};
 use super::{bootstrap_context, AuthContext, AuthError, AuthKind};
 
 // ---------------------------------------------------------------------------
@@ -260,6 +260,17 @@ impl TokenVerifier for OAuth2Verifier {
                     return Err("user is disabled".to_string());
                 }
 
+                // First-party owner authority is recomputed on every request;
+                // it is never persisted in OAuth grants or token scopes.
+                let mut scopes = at_record.scopes_vec();
+                if user.role == "admin"
+                    && client.is_managed_user_owned()
+                    && client.owner_user_id.as_deref() == Some(user.id.as_str())
+                    && !scopes.iter().any(|scope| scope == SCOPE_ADMIN)
+                {
+                    scopes.push(SCOPE_ADMIN.to_string());
+                }
+
                 AuthContext {
                     user_id: Some(user.id.clone()),
                     username: Some(user.username.clone()),
@@ -267,7 +278,7 @@ impl TokenVerifier for OAuth2Verifier {
                     // access token ID as the credential identifier.
                     api_key_id: Some(at_record.id.clone()),
                     role: Some(user.role.clone()),
-                    scopes: at_record.scopes_vec(),
+                    scopes,
                     token_kind: Some("oauth2".to_string()),
                     allowed_client_id: Some(at_record.client_id.clone()),
                     ..AuthContext::new(AuthKind::OAuth2Token)

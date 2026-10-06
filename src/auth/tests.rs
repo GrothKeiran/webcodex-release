@@ -718,6 +718,69 @@ async fn oauth2_verifier_accepts_valid_access_token() {
 }
 
 #[tokio::test]
+async fn admin_pat_does_not_inherit_oauth_effective_admin() {
+    let _env = crate::auth::AuthEnvGuard::auth_required();
+    let config = gate_test_config_oauth2(Some("secret"));
+    let (_tmp, db) = gate_test_db();
+    let user = crate::test_support::seed_user_with_role(&db, "admin", "admin");
+    let token = gate_mint_user_token_with_scopes(&db, &user, "runtime:read");
+    let ctx = PatVerifier
+        .verify(&config, Some(&db), &token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ctx.role.as_deref(), Some("admin"));
+    assert!(!ctx.has_scope(SCOPE_ADMIN));
+    assert!(!ctx.has_scope(SCOPE_PROJECT_WRITE));
+}
+
+#[tokio::test]
+async fn oauth2_effective_admin_requires_current_managed_client_owner() {
+    let config = gate_test_config_oauth2(Some("secret"));
+    let (_tmp, db) = gate_test_db();
+    let user = crate::test_support::seed_user_with_role(&db, "admin", "admin");
+    let other = gate_seed_user(&db, "other");
+    let (client, _) = gate_seed_oauth_client(&db, &user, "Owner App");
+    let (at, plaintext) = gate_seed_oauth_access_token(&db, &client, &user, "runtime:read");
+
+    // Reuse the exact pre-upgrade token while changing current authority.
+    for (role, owner, shared_owner, expected) in [
+        ("admin", Some(user.id.as_str()), None, true),
+        ("user", Some(user.id.as_str()), None, false),
+        ("admin", Some(other.id.as_str()), None, false),
+        ("admin", None, Some("shared-owner"), false),
+        ("admin", Some(user.id.as_str()), None, true),
+    ] {
+        {
+            let conn = db.conn_for_tests();
+            conn.execute(
+                "UPDATE users SET role = ?1 WHERE id = ?2",
+                rusqlite::params![role, user.id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE oauth_clients SET owner_user_id = ?1, owner_shared_key_hash = ?2 WHERE client_id = ?3",
+                rusqlite::params![owner, shared_owner, client.client_id],
+            )
+            .unwrap();
+        }
+        let ctx = OAuth2Verifier
+            .verify(&config, Some(&db), &plaintext)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ctx.has_scope(SCOPE_ADMIN), expected);
+        assert_eq!(
+            db.get_oauth_access_token_by_hash(&at.token_hash)
+                .unwrap()
+                .unwrap()
+                .scopes,
+            "runtime:read"
+        );
+    }
+}
+
+#[tokio::test]
 async fn oauth2_verifier_ignores_managed_user_stray_shared_key_hash() {
     let config = gate_test_config_oauth2(Some("secret"));
     let (_tmp, db) = gate_test_db();
@@ -749,7 +812,7 @@ async fn oauth2_verifier_ignores_managed_user_stray_shared_key_hash() {
 async fn oauth2_verifier_accepts_shared_key_subject_without_user_lookup() {
     let config = gate_test_config_oauth2(Some("secret"));
     let (_tmp, db) = gate_test_db();
-    let owner = gate_seed_user(&db, "owner");
+    let owner = crate::test_support::seed_user_with_role(&db, "owner", "admin");
     let (client, _secret) = gate_seed_oauth_client(&db, &owner, "Test App");
     let (at, plaintext) = gate_seed_shared_key_oauth_access_token(
         &db,
@@ -780,6 +843,7 @@ async fn oauth2_verifier_accepts_shared_key_subject_without_user_lookup() {
     assert!(ctx.is_oauth_shared_key_subject());
     assert!(ctx.scopes.contains(&"runtime:read".to_string()));
     assert!(!ctx.is_admin());
+    assert!(!ctx.has_scope(SCOPE_ADMIN));
 
     let stored = db
         .get_oauth_access_token_by_hash(&at.token_hash)
@@ -1116,6 +1180,7 @@ async fn oauth2_verifier_accepts_current_project_share_and_preserves_project_ide
         .unwrap()
         .expect("current project-share token should verify");
     assert!(ctx.is_oauth_project_subject());
+    assert!(!ctx.has_scope(SCOPE_ADMIN));
     assert_eq!(
         ctx.project_grant_id.as_deref(),
         Some("wc_pgrant_111111111111111111111111")

@@ -104,7 +104,9 @@ WebCodex 新增 scope 时不会静默扩大已有 OAuth client 的权限上限�
 
 Browser Use 的 shared-key OAuth delegation 需要在 `connect --auth oauth` 时显式指定 `--oauth-browser-permissions`，仅追加 `browser:read`、`browser:control`、`browser:launch`。默认 baseline 不包含 Browser scope；Browser 与 `--oauth-computer-permissions` 相互独立，也不使用 Computer consent checkbox。已有 client 不会自动扩权，历史窄权限仅追加显式选择的类别。scope ceiling 变化会撤销旧 grants 并要求重新授权；复用已启用 Browser 的 profile 时必须继续携带该 flag。
 
-Operator/admin diagnostics（如 `read_tool_trace`）不属于普通 OAuth delegation。`admin` 不在 OAuth supported scopes 或 shared-key bridge ceiling 中。Manifest discovery 同时检查 caller authority 和 protocol capability；即使硬编码调用，权限拒绝也不会发出暗示可通过 OAuth reconnect 获得 `admin` 的 challenge。Browser 等可委托 scope 缺失时仍返回标准 `WWW-Authenticate: Bearer error="insufficient_scope"`。
+`admin` 仍不属于普通 OAuth 可请求或可委托 scope，也不在 shared-key bridge ceiling 中。唯一的动态继承规则是：managed-user OAuth 的当前用户仍为 admin，且 client 是该用户本人拥有的 managed-user client，Server 才会在每次验证时为 AuthContext 补入有效 `admin`（first-party owner authority）。不把 `admin` 写入 grant、access token 或 refresh token scopes；已有连接无需重新登录、授权、创建 client 或更换 token，refresh rotation 后仍适用。用户降级或 client ownership 不再满足条件后，下一次请求立即失去该隐式权限。普通用户、他人拥有的 delegated client、shared-key 和 project-share OAuth 均不能因此获得 admin；窄权限 PAT 不受影响。
+
+符合上述条件的调用方可发现并调用 `read_tool_trace`；Host 刷新工具定义后可显示 direct tool。Manifest discovery 同时检查 caller authority 和 protocol capability。其他调用方的硬编码调用仍会被拒绝，且不会收到暗示 OAuth reconnect 可获得 `admin` 的 challenge。Browser 等可委托 scope 缺失时仍返回标准 `WWW-Authenticate: Bearer error="insufficient_scope"`。
 
 Server 侧配置见[部署指南](DEPLOYMENT.zh-CN.md#oauth2)；MCP client 设置见 [MCP](MCP.zh-CN.md#oauth2)。
 

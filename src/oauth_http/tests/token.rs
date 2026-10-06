@@ -1974,3 +1974,49 @@ async fn refresh_token_scope_parameter_rejected() {
     let json: serde_json::Value = resp.take_json().await.unwrap();
     assert_eq!(json["error"], "invalid_request");
 }
+
+#[tokio::test]
+async fn refresh_rotation_preserves_stored_scopes_and_recomputes_effective_admin() {
+    let config = test_config(oauth2_enabled_no_pkce());
+    let (_tmp, db) = test_db();
+    let user = crate::test_support::seed_user_with_role(&db, "admin", "admin");
+    let (client, secret) = seed_client(&db, &user, "Owner App");
+    let (_, mut refresh) = seed_refresh_token(&db, &client, &user, "runtime:read");
+    let service = Service::new(build_router(config.clone(), db.clone()));
+    for _ in 0..2 {
+        let body = form_body(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh),
+            ("client_id", &client.client_id),
+            ("client_secret", &secret),
+        ]);
+        let mut resp = post_form("http://localhost/oauth/token", body)
+            .send(&service)
+            .await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let json: serde_json::Value = resp.take_json().await.unwrap();
+        assert_eq!(json["scope"], "runtime:read");
+        let access = json["access_token"].as_str().unwrap();
+        refresh = json["refresh_token"].as_str().unwrap().to_string();
+        assert_eq!(
+            db.get_oauth_access_token_by_hash(&hash_token(access))
+                .unwrap()
+                .unwrap()
+                .scopes,
+            "runtime:read"
+        );
+        assert_eq!(
+            db.get_oauth_refresh_token_by_hash(&hash_token(&refresh))
+                .unwrap()
+                .unwrap()
+                .scopes,
+            "runtime:read"
+        );
+        let ctx = OAuth2Verifier
+            .verify(&config, Some(&db), access)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ctx.has_scope(crate::auth::SCOPE_ADMIN));
+    }
+}
