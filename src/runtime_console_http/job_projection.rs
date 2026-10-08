@@ -5,7 +5,7 @@ use super::{
     bounded_text_str, is_valid_session_id, valid_project_id, RuntimeConsoleError,
     MAX_PROJECT_ID_CHARS,
 };
-use crate::auth::{AuthContext, SCOPE_RUNTIME_READ};
+use crate::auth::{AuthContext, SCOPE_PROJECT_READ, SCOPE_RUNTIME_READ};
 use crate::tool_runtime::ToolRuntime;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -84,19 +84,41 @@ pub(super) async fn runner_jobs_for_auth(
     client_id: &str,
 ) -> Result<(Vec<RuntimeConsoleRunnerJob>, bool), RuntimeConsoleError> {
     let page = runtime
-        .query_job_inventory_for_auth(Some(100), None, None, None, Some(auth))
+        .query_job_inventory_for_auth(Some(100), None, None, None, Some(client_id), Some(auth))
         .await
         .map_err(|_| RuntimeConsoleError::Internal)?;
-    // The underlying query is global and bounded before the Runner filter.
-    // Never claim that the Runner view is complete when any global rows
-    // were truncated ahead of filtering.
     let truncated = page.truncated();
+    // Job visibility is admission-time authority. Project/Session association
+    // additionally requires current Project visibility so retained Jobs cannot
+    // disclose an unregistered or otherwise no-longer-visible Project anchor.
+    let visible_projects = if auth.has_scope(SCOPE_PROJECT_READ) {
+        let requested = page
+            .jobs
+            .iter()
+            .filter_map(|job| {
+                job.project_id
+                    .as_deref()
+                    .and_then(|id| bounded_text_str(id, MAX_PROJECT_ID_CHARS))
+            })
+            .collect::<Vec<_>>();
+        let access = crate::runner_http::runner_access_from_auth(Some(auth));
+        runtime
+            .runner_registry
+            .visible_project_ids_for_auth_snapshot(access.as_ref(), &requested)
+            .await
+    } else {
+        std::collections::HashSet::new()
+    };
     let jobs = page
         .jobs
         .iter()
-        .filter(|job| job.client_id == client_id)
         .filter_map(|job| {
             let status = bounded_text_str(&job.status, 80)?;
+            let project_id = job
+                .project_id
+                .as_deref()
+                .filter(|id| visible_projects.contains(*id))
+                .and_then(|id| bounded_text_str(id, MAX_PROJECT_ID_CHARS));
             Some(RuntimeConsoleRunnerJob {
                 job_id: bounded_text_str(&job.job_id, 160)?,
                 kind: bounded_text_str(&job.kind, 80)?,
@@ -106,24 +128,12 @@ pub(super) async fn runner_jobs_for_auth(
                 created_at: job.created_at,
                 started_at: job.started_at,
                 elapsed_secs: job.elapsed_secs,
-                // Project and Session association are not runtime-read-only
-                // authority; omit them without independent Project read scope.
-                project_id: auth
-                    .has_scope(crate::auth::SCOPE_PROJECT_READ)
-                    .then(|| {
-                        job.project_id
-                            .as_deref()
-                            .and_then(|id| bounded_text_str(id, MAX_PROJECT_ID_CHARS))
-                    })
-                    .flatten(),
-                session_id: auth
-                    .has_scope(crate::auth::SCOPE_PROJECT_READ)
-                    .then(|| {
-                        job.session_id
-                            .as_deref()
-                            .and_then(|id| bounded_text_str(id, 160))
-                    })
-                    .flatten(),
+                session_id: project_id.as_ref().and_then(|_| {
+                    job.session_id
+                        .as_deref()
+                        .and_then(|id| bounded_text_str(id, 160))
+                }),
+                project_id,
             })
         })
         .collect();
@@ -139,7 +149,7 @@ pub(super) async fn running_jobs_for_auth(
         return Ok(RunningJobSnapshot::default());
     }
     let page = runtime
-        .query_job_inventory_for_auth(Some(100), Some("running"), project, None, Some(auth))
+        .query_job_inventory_for_auth(Some(100), Some("running"), project, None, None, Some(auth))
         .await
         .map_err(|_| RuntimeConsoleError::Internal)?;
     let mut snapshot = RunningJobSnapshot {
@@ -180,7 +190,14 @@ pub(super) async fn session_jobs_for_auth(
     session_id: &str,
 ) -> Result<(Vec<RuntimeConsoleSessionJob>, bool), RuntimeConsoleError> {
     let page = runtime
-        .query_job_inventory_for_auth(Some(100), None, Some(project), Some(session_id), Some(auth))
+        .query_job_inventory_for_auth(
+            Some(100),
+            None,
+            Some(project),
+            Some(session_id),
+            None,
+            Some(auth),
+        )
         .await
         .map_err(|_| RuntimeConsoleError::Internal)?;
     Ok((

@@ -110,6 +110,25 @@ async fn console_job_query_uses_the_same_authorized_inventory_without_model_only
         foreign_runner_jobs.is_empty(),
         "runner inventory must use existing job visibility"
     );
+    crate::test_support::apply_project_inventory_snapshot(
+        &runtime.runner_registry,
+        "job-query-own",
+        "inst-job-query-own",
+        Vec::new(),
+    )
+    .await;
+    let (retained_job, _) = runner_jobs_for_auth(&runtime, &auth, "job-query-own")
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_job.len(),
+        1,
+        "retained Job identity remains visible"
+    );
+    assert!(
+        retained_job[0].project_id.is_none() && retained_job[0].session_id.is_none(),
+        "Project/Session association must be reauthorized against current Project visibility"
+    );
 
     let (invisible, truncated) =
         session_jobs_for_auth(&runtime, &foreign, project, &session.session_id)
