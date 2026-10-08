@@ -59,6 +59,77 @@ fn session_job(job: &ShellJobInfo) -> Option<RuntimeConsoleSessionJob> {
     })
 }
 
+/// Bounded, credential-filtered Runner Job inventory for operator diagnostics.
+/// This is a presentation of canonical Job state, not another lifecycle owner.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct RuntimeConsoleRunnerJob {
+    pub(super) job_id: String,
+    pub(super) kind: String,
+    pub(super) status: String,
+    pub(super) terminal: bool,
+    pub(super) created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) elapsed_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) session_id: Option<String>,
+}
+
+pub(super) async fn runner_jobs_for_auth(
+    runtime: &ToolRuntime,
+    auth: &AuthContext,
+    client_id: &str,
+) -> Result<(Vec<RuntimeConsoleRunnerJob>, bool), RuntimeConsoleError> {
+    let page = runtime
+        .query_job_inventory_for_auth(Some(100), None, None, None, Some(auth))
+        .await
+        .map_err(|_| RuntimeConsoleError::Internal)?;
+    // The underlying query is global and bounded before the Runner filter.
+    // Never claim that the Runner view is complete when any global rows
+    // were truncated ahead of filtering.
+    let truncated = page.truncated();
+    let jobs = page
+        .jobs
+        .iter()
+        .filter(|job| job.client_id == client_id)
+        .filter_map(|job| {
+            let status = bounded_text_str(&job.status, 80)?;
+            Some(RuntimeConsoleRunnerJob {
+                job_id: bounded_text_str(&job.job_id, 160)?,
+                kind: bounded_text_str(&job.kind, 80)?,
+                terminal: RunnerJobLifecycle::from_wire(&status)
+                    .is_ok_and(RunnerJobLifecycle::is_terminal),
+                status,
+                created_at: job.created_at,
+                started_at: job.started_at,
+                elapsed_secs: job.elapsed_secs,
+                // Project and Session association are not runtime-read-only
+                // authority; omit them without independent Project read scope.
+                project_id: auth
+                    .has_scope(crate::auth::SCOPE_PROJECT_READ)
+                    .then(|| {
+                        job.project_id
+                            .as_deref()
+                            .and_then(|id| bounded_text_str(id, MAX_PROJECT_ID_CHARS))
+                    })
+                    .flatten(),
+                session_id: auth
+                    .has_scope(crate::auth::SCOPE_PROJECT_READ)
+                    .then(|| {
+                        job.session_id
+                            .as_deref()
+                            .and_then(|id| bounded_text_str(id, 160))
+                    })
+                    .flatten(),
+            })
+        })
+        .collect();
+    Ok((jobs, truncated))
+}
+
 pub(super) async fn running_jobs_for_auth(
     runtime: &ToolRuntime,
     auth: &AuthContext,
