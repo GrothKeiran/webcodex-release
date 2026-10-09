@@ -213,6 +213,7 @@ struct CdpEventBuffer {
     network: HashMap<String, BackendNetworkEntry>,
     network_order: VecDeque<String>,
     network_truncated: bool,
+    network_events_discarded: bool,
     pending_network: HashSet<String>,
     next_sequence: u64,
     cleared_through_sequence: u64,
@@ -272,6 +273,7 @@ impl CdpEventBuffer {
         self.network.clear();
         self.network_order.clear();
         self.network_truncated = false;
+        self.network_events_discarded = false;
         self.pending_network.clear();
     }
 
@@ -1608,11 +1610,30 @@ impl BrowserBackend for CdpBackend {
             if self.ensure_event_collector(target_id).is_err()
                 || self.drain_target_collector(target_id).is_err()
             {
+                if matches!(&self.owner, CdpOwner::External(lease) if lease.live_process_id().is_err())
+                {
+                    return Ok(BrowserStability {
+                        stable: false,
+                        waited_ms: started.elapsed().as_millis() as u64,
+                        reason: "attachment_lost".to_string(),
+                    });
+                }
                 last_reason = "collector_recovering".to_string();
                 std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
                 continue;
             }
 
+            if self
+                .collectors
+                .get(target_id)
+                .is_some_and(|collector| collector.events.network_events_discarded)
+            {
+                return Ok(BrowserStability {
+                    stable: false,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                    reason: "diagnostic_events_discarded".to_string(),
+                });
+            }
             let (pending, network_cursor) = self
                 .collectors
                 .get(target_id)
@@ -3581,6 +3602,15 @@ fn record_cdp_event(buffer: &mut CdpEventBuffer, value: &Value) {
     let method = value.get("method").and_then(Value::as_str);
     let params = value.get("params").cloned().unwrap_or_default();
     match method {
+        Some("WebCodex.eventsDiscarded") => {
+            buffer.next_sequence();
+            if params["domain"] == "Network" {
+                buffer.network_truncated = true;
+                buffer.network_events_discarded = true;
+            } else {
+                buffer.console_truncated = true;
+            }
+        }
         Some("Runtime.consoleAPICalled") => {
             let level = params.get("type").and_then(Value::as_str).unwrap_or("log");
             let text = params
@@ -3852,6 +3882,29 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use tungstenite::{accept, Message};
+
+    #[test]
+    fn discarded_diagnostics_are_explicit_and_cannot_claim_network_quiet() {
+        let mut buffer = CdpEventBuffer::default();
+        record_cdp_event(
+            &mut buffer,
+            &json!({"method":"WebCodex.eventsDiscarded", "params":{"domain":"Runtime"}}),
+        );
+        assert!(buffer.console_truncated);
+        assert!(!buffer.network_events_discarded);
+        record_cdp_event(
+            &mut buffer,
+            &json!({"method":"WebCodex.eventsDiscarded", "params":{"domain":"Network"}}),
+        );
+        assert!(buffer.network_truncated);
+        assert!(buffer.network_events_discarded);
+        assert_eq!(buffer.cursor(), 2);
+        buffer.clear();
+        assert!(!buffer.network_events_discarded);
+        assert!(!buffer.console_truncated);
+        assert!(!buffer.network_truncated);
+        assert_eq!(buffer.cleared_through_sequence, 2);
+    }
 
     #[test]
     fn dom_control_capabilities_follow_the_owning_element() {
