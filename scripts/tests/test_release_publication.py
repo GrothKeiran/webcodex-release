@@ -3,8 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 from pathlib import Path
@@ -704,6 +708,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("SOURCE_SHORT:", supplemental)
         self.assertNotIn("expected_version=", supplemental)
 
+    def test_release_preflight_provisions_tooling_before_static_contracts(self) -> None:
+        workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        preflight = workflow.split("  preflight:\n", 1)[1].split("  prepare:\n", 1)[0]
+        self.assertLess(
+            preflight.index("Ensure release preflight tooling"),
+            preflight.index("Fail fast on deterministic release contracts"),
+        )
+        self.assertIn("PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.cache/python", preflight)
+        self.assertIn("TMPDIR: ${{ github.workspace }}/.cache/tmp", preflight)
+        self.assertIn("XDG_CACHE_HOME: ${{ github.workspace }}/.cache/xdg", preflight)
+        self.assertIn("npm_config_cache: ${{ github.workspace }}/.cache/npm", preflight)
+        self.assertNotIn("continue-on-error", preflight)
+
     def test_release_build_fails_fast_and_keeps_unified_installers_optional(self) -> None:
         workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
         preflight = workflow.index("  preflight:")
@@ -866,6 +883,85 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("compose_base config --images", bootstrap)
         self.assertIn("compose_base pull webcodex", bootstrap)
         self.assertIn("compose_full up -d --build", bootstrap)
+
+
+
+
+@unittest.skipIf(os.name == "nt" or shutil.which("bash") is None, "Linux release-preflight shell fixture")
+class ReleasePreflightToolingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        project = Path(__file__).resolve().parents[2]
+        cache_tmp = project / ".cache/tmp"
+        cache_tmp.mkdir(parents=True, exist_ok=True)
+        temp = tempfile.TemporaryDirectory(prefix="release-preflight-tooling-", dir=cache_tmp)
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        workflow = (project / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        step = workflow.split("- name: Ensure release preflight tooling\n", 1)[1]
+        step = step.split("- name: Fail fast on deterministic release contracts\n", 1)[0]
+        self.script = textwrap.dedent(step.split("run: |\n", 1)[1])
+
+    def _run_tooling(self, *, rg_exists: bool, apt_exit: int = 0, rg_exit: int = 0):
+        # Functions intercept dependency discovery, sudo and rg. No network or
+        # actual package-manager writes are allowed in this regression fixture.
+        mocks = r'''command() {
+  if [ "$1" = "-v" ] && [ "$2" = "rg" ]; then return "$RG_PROBE_EXIT"; fi
+  builtin command "$@"
+}
+sudo() {
+  printf 'sudo %s\n' "$*" >> "$TOOLING_LOG"
+  return "$APT_EXIT"
+}
+rg() {
+  printf 'rg %s\n' "$*" >> "$TOOLING_LOG"
+  return "$RG_EXIT"
+}
+'''
+        log = self.root / "tooling.log"
+        env = {
+            **os.environ,
+            "RG_PROBE_EXIT": "0" if rg_exists else "1",
+            "APT_EXIT": str(apt_exit),
+            "RG_EXIT": str(rg_exit),
+            "TOOLING_LOG": str(log),
+            "TMPDIR": str(self.root / ".cache/tmp"),
+            "XDG_CACHE_HOME": str(self.root / ".cache/xdg"),
+        }
+        result = subprocess.run(
+            ["bash", "-c", mocks + self.script], cwd=self.root, env=env,
+            text=True, capture_output=True, timeout=10,
+        )
+        return result, log.read_text(encoding="utf-8").splitlines()
+
+    def test_missing_rg_is_installed_and_checked_with_project_local_apt_cache(self) -> None:
+        result, commands = self._run_tooling(rg_exists=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(commands[0].endswith(" update"))
+        self.assertTrue(commands[1].endswith(" install --no-install-recommends -y ripgrep"))
+        for command in commands[:2]:
+            self.assertIn(f"Dir::Cache={self.root}/.cache/apt", command)
+            self.assertIn(f"Dir::State::lists={self.root}/.cache/apt/lists", command)
+        self.assertEqual(commands[2], "rg --version")
+        self.assertTrue((self.root / ".cache/apt/archives/partial").is_dir())
+        self.assertTrue((self.root / ".cache/apt/lists/partial").is_dir())
+
+    def test_existing_rg_is_checked_without_package_manager(self) -> None:
+        result, commands = self._run_tooling(rg_exists=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(commands, ["rg --version"])
+        self.assertFalse((self.root / ".cache/apt").exists())
+
+    def test_package_manager_failure_stops_before_install_and_contracts(self) -> None:
+        result, commands = self._run_tooling(rg_exists=False, apt_exit=7)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(commands[0].endswith(" update"))
+
+    def test_unusable_rg_fails_closed(self) -> None:
+        result, commands = self._run_tooling(rg_exists=True, rg_exit=8)
+        self.assertEqual(result.returncode, 8)
+        self.assertEqual(commands, ["rg --version"])
 
 
 if __name__ == "__main__":

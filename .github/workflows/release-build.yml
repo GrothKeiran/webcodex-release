@@ -47,6 +47,11 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.cache/python
+      TMPDIR: ${{ github.workspace }}/.cache/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/.cache/xdg
+      npm_config_cache: ${{ github.workspace }}/.cache/npm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -57,6 +62,18 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+      - name: Ensure release preflight tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$XDG_CACHE_HOME"
+          if ! command -v rg >/dev/null 2>&1; then
+            apt_cache="$PWD/.cache/apt"
+            mkdir -p "$apt_cache/archives/partial" "$apt_cache/lists/partial"
+            sudo apt-get -o "Dir::Cache=$apt_cache" -o "Dir::State::lists=$apt_cache/lists" update
+            sudo apt-get -o "Dir::Cache=$apt_cache" -o "Dir::State::lists=$apt_cache/lists" install --no-install-recommends -y ripgrep
+          fi
+          rg --version
       - name: Fail fast on deterministic release contracts
         shell: bash
         env:
