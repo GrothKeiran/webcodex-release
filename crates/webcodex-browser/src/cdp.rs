@@ -305,6 +305,7 @@ impl CdpEventBuffer {
 struct CdpEventCollector {
     websocket: CdpSocket,
     events: CdpEventBuffer,
+    reconnect_required: bool,
 }
 
 pub(crate) struct ChromiumFactory;
@@ -689,7 +690,11 @@ impl CdpBackend {
     }
 
     fn ensure_event_collector(&mut self, target_id: &str) -> BrowserResult<()> {
-        if self.collectors.contains_key(target_id) {
+        if self
+            .collectors
+            .get(target_id)
+            .is_some_and(|collector| !collector.reconnect_required)
+        {
             return Ok(());
         }
         let deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -704,13 +709,22 @@ impl CdpBackend {
                 deadline,
             )?;
         }
-        self.collectors.insert(
-            target_id.to_string(),
-            CdpEventCollector {
-                websocket,
-                events: CdpEventBuffer::default(),
-            },
-        );
+        if let Some(collector) = self.collectors.get_mut(target_id) {
+            // Retain the bounded event buffer and its diagnostic-loss marker.
+            // Reconnecting a read-only collector must not erase missing network
+            // evidence or replay any pending Browser effect.
+            collector.websocket = websocket;
+            collector.reconnect_required = false;
+        } else {
+            self.collectors.insert(
+                target_id.to_string(),
+                CdpEventCollector {
+                    websocket,
+                    events: CdpEventBuffer::default(),
+                    reconnect_required: false,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -723,7 +737,17 @@ impl CdpBackend {
             drain_event_collector(collector)
         };
         if result.is_err() {
-            self.collectors.remove(target_id);
+            let collector = self
+                .collectors
+                .get_mut(target_id)
+                .expect("collector still exists after failed drain");
+            collector.reconnect_required = true;
+            // A lost transport route leaves an unknown diagnostic interval:
+            // preserve bounded evidence until explicit clear_diagnostics.
+            collector.events.next_sequence();
+            collector.events.console_truncated = true;
+            collector.events.network_truncated = true;
+            collector.events.network_events_discarded = true;
         }
         result
     }
@@ -5357,6 +5381,7 @@ Connection: close
         let mut collector = CdpEventCollector {
             websocket,
             events: CdpEventBuffer::default(),
+            reconnect_required: false,
         };
         collector.events.push_console(BackendConsoleEntry {
             sequence: 0,
@@ -5465,6 +5490,7 @@ Connection: close
         let mut collector = CdpEventCollector {
             websocket,
             events: CdpEventBuffer::default(),
+            reconnect_required: false,
         };
         collector.events.push_console(BackendConsoleEntry {
             sequence: 0,
@@ -5506,6 +5532,7 @@ Connection: close
         let mut collector = CdpEventCollector {
             websocket,
             events: CdpEventBuffer::default(),
+            reconnect_required: false,
         };
         collector.events.push_console(BackendConsoleEntry {
             sequence: 0,

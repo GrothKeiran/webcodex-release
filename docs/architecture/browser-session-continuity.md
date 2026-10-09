@@ -108,7 +108,7 @@ by Rust still fail closed.
 | Observation | Meaning and recovery |
 |---|---|
 | New loader/document | Refresh Snapshot; old element authority is invalid. No Share or attach is needed. |
-| `collector_recovering` / diagnostic stream error | A collector route was lost. The next observation may recreate only that route through `ExternalLease::socket`, which rechecks peer, lease and exact admitted target. No debugger reattach or effect replay. |
+| `collector_recovering` / diagnostic stream error | A collector route was lost. The next observation may recreate only that route through `ExternalLease::socket`, which rechecks peer, lease and exact admitted target. The recovered collector retains its bounded diagnostic-loss marker, so network quiet is not asserted until an explicit `clear_diagnostics` barrier. No debugger reattach or effect replay. |
 | `attachment_lost` | Post-effect collection found the external lease no longer live. Stop collector recovery; Share is required. The acknowledged effect is not replayed. |
 | `diagnostic_events_discarded` | Network diagnostic evidence is incomplete; do not claim network quiet. Snapshot remains usable. |
 | Extension `debugger_target_closed`, `debugger_canceled_by_user`, `debugger_detached` | Actual debugger detach, not document replacement. Original-tab detach invalidates consent; no automatic reattach. Unknown Chrome reasons are mapped to the fixed generic code. |

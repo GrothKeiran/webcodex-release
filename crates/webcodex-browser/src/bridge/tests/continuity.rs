@@ -55,6 +55,16 @@ fn external_document_replacement_and_collector_recovery_preserve_lease() {
     assert!(backend.console("tab_123").is_err());
     lease.live().unwrap();
     backend.console("tab_123").unwrap();
+    // Recovered collector routes must not claim quiet network when diagnostic
+    // evidence was lost between the old and replacement subscriptions.
+    assert!(backend.network("tab_123").unwrap().truncated);
+    let recovered = backend
+        .wait_for_stable("tab_123", Duration::from_secs(1))
+        .unwrap();
+    assert!(!recovered.stable);
+    assert_eq!(recovered.reason, "diagnostic_events_discarded");
+    backend.clear_diagnostics("tab_123").unwrap();
+    assert!(!backend.network("tab_123").unwrap().truncated);
     assert_eq!(backend.snapshot("tab_123", 8).unwrap().document_id, "doc-3");
     assert!(server.state.receive(&lease.0.peer, json!({"kind":"event", "lease":lease.0.lease,
         "target":"tab_123", "message":{"method":"WebCodex.eventsDiscarded", "params":{"domain":"Network"}}})));
@@ -95,7 +105,16 @@ fn diagnostic_queue_overflow_loses_route_not_peer_or_consent() {
     let server = BridgeServer::start_at(&root).unwrap();
     let mut stream = connect(&server);
     let id = offer(&server, &mut stream);
-    let worker = peer_worker(stream, Arc::new(Mutex::new(Vec::new())));
+    // Stop the fixture after receiving the lease cleanup command. A generic
+    // peer worker would answer detach while server shutdown races the socket,
+    // making this test flaky with a harmless BrokenPipe.
+    let worker = std::thread::spawn(move || {
+        let attach = protocol::read_blocking(&mut stream, MAX_RESPONSE, false).unwrap();
+        assert_eq!(attach["request"]["method"], "attach");
+        respond(&mut stream, &attach, json!({}));
+        let detach = protocol::read_blocking(&mut stream, MAX_RESPONSE, false).unwrap();
+        assert_eq!(detach["request"]["method"], "detach");
+    });
     let lease = server
         .attach(&id, Instant::now() + Duration::from_secs(2))
         .unwrap();
@@ -115,8 +134,8 @@ fn diagnostic_queue_overflow_loses_route_not_peer_or_consent() {
     assert_eq!(server.state.queued.load(Ordering::Acquire), 0);
     drop(replacement);
     drop(lease);
-    drop(server);
     worker.join().unwrap();
+    drop(server);
 }
 
 #[test]
