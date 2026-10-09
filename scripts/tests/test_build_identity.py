@@ -41,7 +41,7 @@ class BuildIdentityTests(unittest.TestCase):
                 (package / "src").mkdir(parents=True)
                 (package / "Cargo.toml").write_text(
                     '[package]\nname = "identity-fixture"\nversion = "0.0.0"\n'
-                    'edition = "2021"\n', encoding="utf-8",
+                    'edition = "2021"\n[workspace]\n', encoding="utf-8",
                 )
                 shutil.copyfile(BUILD_SCRIPT, package / "build.rs")
                 (package / "src/main.rs").write_text(
@@ -105,7 +105,7 @@ class BuildIdentityTests(unittest.TestCase):
                 (package / "src").mkdir(parents=True)
                 (package / "Cargo.toml").write_text(
                     '[package]\nname = "identity-fixture"\nversion = "0.0.0"\n'
-                    'edition = "2021"\n', encoding="utf-8",
+                    'edition = "2021"\n[workspace]\n', encoding="utf-8",
                 )
                 shutil.copyfile(BUILD_SCRIPT, package / "build.rs")
                 (package / "src/main.rs").write_text(
@@ -190,7 +190,7 @@ class BuildIdentityTests(unittest.TestCase):
                 (package / "src").mkdir(parents=True)
                 (package / "Cargo.toml").write_text(
                     '[package]\nname = "identity-fixture"\nversion = "0.0.0"\n'
-                    'edition = "2021"\n', encoding="utf-8",
+                    'edition = "2021"\n[workspace]\n', encoding="utf-8",
                 )
                 shutil.copyfile(BUILD_SCRIPT, package / "build.rs")
                 (package / "src/main.rs").write_text(
@@ -330,7 +330,7 @@ class BuildIdentityBoundaryTests(unittest.TestCase):
             package = root / "crates/identity-archive"
             (package / "src").mkdir(parents=True)
             (package / "Cargo.toml").write_text(
-                '[package]\nname = "identity-archive"\nversion = "0.0.0"\nedition = "2021"\n', encoding="utf-8")
+                '[package]\nname = "identity-archive"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n', encoding="utf-8")
             shutil.copyfile(BUILD_SCRIPT, package / "build.rs")
             (package / "src/main.rs").write_text(
                 'fn main() { println!("{}|{}|{}", env!("WEBCODEX_BUILD_GIT_COMMIT"), '
@@ -340,6 +340,8 @@ class BuildIdentityBoundaryTests(unittest.TestCase):
                         "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
                 env.pop(key, None)
             env["CARGO_TARGET_DIR"] = str(root / "target")
+            # A project-local TMPDIR must not borrow the enclosing checkout identity.
+            env["GIT_CEILING_DIRECTORIES"] = str(root.parent)
             env["SOURCE_DATE_EPOCH"] = "1234567890"
 
             def build():

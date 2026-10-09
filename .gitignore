@@ -66,3 +66,6 @@ __pycache__/
 /artifacts/mcp-workspaces/
 /artifacts/runtime-call-stream/
 /scripts/ui-smoke/node_modules/
+
+# Project-local validation and fork release caches.
+/.cache/

@@ -238,8 +238,8 @@ jobs:
       ARCHIVE_STEM: ${{ needs.prepare.outputs.archive_stem }}
       WEBCODEX_RELEASE_PLATFORM: ${{ matrix.platform }}
       MANYLINUX_IMAGE: ${{ matrix.image }}
-      CARGO_CACHE_DIR: /tmp/webcodex-release-cargo-${{ matrix.platform }}
-      RUSTUP_CACHE_DIR: /tmp/webcodex-release-rustup-${{ matrix.platform }}
+      CARGO_CACHE_DIR: ${{ github.workspace }}/.cache/release-cargo-${{ matrix.platform }}
+      RUSTUP_CACHE_DIR: ${{ github.workspace }}/.cache/release-rustup-${{ matrix.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

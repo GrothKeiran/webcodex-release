@@ -1,0 +1,254 @@
+name: Fork release 0.5.0
+run-name: Personal fork release v0.5.0 from ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-v0.5.0
+  cancel-in-progress: false
+
+env:
+  PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.cache/python
+  TMPDIR: ${{ github.workspace }}/.cache/tmp
+  XDG_CACHE_HOME: ${{ github.workspace }}/.cache/xdg
+  npm_config_cache: ${{ github.workspace }}/.cache/npm
+  RELEASE_REPO: GrothKeiran/webcodex-release
+  RELEASE_TAG: v0.5.0
+  SOURCE_REF: release/v0.5.0
+  SOURCE_SHA: ${{ github.sha }}
+
+jobs:
+  signing-probe:
+    if: github.repository == 'GrothKeiran/webcodex-release' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate this fork's persistent signing identity
+        shell: bash
+        env:
+          BUILD_KIND: release
+          WEBCODEX_MACOS_SIGNING_MODE: ${{ vars.MACOS_SIGNING_MODE }}
+          WEBCODEX_MACOS_CERTIFICATE_SHA1: ${{ vars.MACOS_CERTIFICATE_SHA1 }}
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_SIGNING_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          bash scripts/macos_ci_signing_setup.sh
+      - name: Verify a signed executable before the expensive builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /usr/bin/true .cache/signing-probe
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none .cache/signing-probe
+          codesign --verify --strict .cache/signing-probe
+      - name: Remove the ephemeral signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${WEBCODEX_SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$WEBCODEX_SIGNING_KEYCHAIN"
+          fi
+
+  release:
+    needs: signing-probe
+    if: github.repository == 'GrothKeiran/webcodex-release' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fence the public fork and immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" .cache/fork-release
+          test "$GITHUB_REPOSITORY" = "$RELEASE_REPO"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          import collect_release_bundle as collector
+          c = collector.GitHubClient(os.environ['RELEASE_REPO'], os.environ['GH_TOKEN'], 30)
+          repo = c.fetch_json('')
+          if repo.get('private') is not False or repo.get('fork') is not True or repo.get('parent', {}).get('full_name') != 'yyjeqhc/webcodex':
+              raise SystemExit('Not the authorized public upstream fork')
+          ref = c.fetch_json('/git/ref/heads/' + os.environ['SOURCE_REF'])
+          if ref['object']['sha'] != os.environ['SOURCE_SHA']:
+              raise SystemExit('Release source branch has moved')
+          PY
+          gh api "repos/$RELEASE_REPO/git/matching-refs/tags/$RELEASE_TAG" > .cache/fork-release/tag-refs.json
+          gh api "repos/$RELEASE_REPO/releases?per_page=100" > .cache/fork-release/releases.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('.cache/fork-release')
+          tag = os.environ['RELEASE_TAG']
+          if any(r['ref'] == 'refs/tags/' + tag for r in json.loads((p / 'tag-refs.json').read_text())):
+              raise SystemExit('Tag already exists; never move or replace it')
+          if any(r['tag_name'] == tag for r in json.loads((p / 'releases.json').read_text())):
+              raise SystemExit('Release already exists; never overwrite assets')
+          PY
+      - name: Wait for exact-source CI and release evidence (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, sys, time, urllib.parse
+          sys.path.insert(0, 'scripts')
+          import collect_release_bundle as collector
+          c = collector.GitHubClient(os.environ['RELEASE_REPO'], os.environ['GH_TOKEN'], 30)
+          source, ref = os.environ['SOURCE_SHA'], os.environ['SOURCE_REF']
+          pending = {'ci.yml', 'release-readiness.yml'}
+          deadline = time.monotonic() + 90 * 60
+          while pending:
+              if c.fetch_json('/git/ref/heads/' + ref)['object']['sha'] != source:
+                  raise SystemExit('Release source moved while waiting')
+              for workflow in sorted(pending):
+                  query = urllib.parse.urlencode({'branch': ref, 'head_sha': source, 'event': 'push', 'per_page': 100})
+                  runs = c.fetch_json('/actions/workflows/' + workflow + '/runs?' + query)['workflow_runs']
+                  runs = [r for r in runs if r.get('head_sha') == source and r.get('head_branch') == ref and r.get('event') == 'push' and r.get('path') == '.github/workflows/' + workflow]
+                  if not runs:
+                      continue
+                  run = max(runs, key=lambda r: r['id'])
+                  if run['status'] == 'completed':
+                      if run['conclusion'] != 'success':
+                          raise SystemExit('Required gate failed: ' + run['html_url'])
+                      print('Passed gate: ' + run['html_url'], flush=True)
+                      pending.remove(workflow)
+              if pending:
+                  if time.monotonic() >= deadline:
+                      raise SystemExit('Timed out waiting for exact-source gates')
+                  time.sleep(30)
+          PY
+      - name: Run the upstream pre-tag readiness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=.cache/fork-release/readiness.json
+          rc=0
+          python3 scripts/release_operator.py readiness-start \
+            --repo "$RELEASE_REPO" --source-sha "$SOURCE_SHA" --source-ref "$SOURCE_REF" \
+            --state-file "$state" || rc=$?
+          test "$rc" -eq 0 || test "$rc" -eq 2
+          for attempt in {1..12}; do
+            rc=0
+            python3 scripts/release_operator.py readiness-status --state-file "$state" --wait-secs 300 || rc=$?
+            if [ "$rc" -eq 0 ]; then exit 0; fi
+            test "$rc" -eq 2
+          done
+          echo 'Readiness did not finish within the bounded wait' >&2
+          exit 1
+      - name: Create the annotated tag without replacing an existing ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$RELEASE_REPO/git/ref/heads/$SOURCE_REF" --jq '.object.sha')
+          test "$current" = "$SOURCE_SHA"
+          tag_object=$(gh api --method POST "repos/$RELEASE_REPO/git/tags" \
+            -f tag="$RELEASE_TAG" -f object="$SOURCE_SHA" -f type=commit \
+            -f message="Personal fork build $RELEASE_TAG from $SOURCE_SHA; exact-source CI and release readiness passed." \
+            --jq '.sha')
+          gh api --method POST "repos/$RELEASE_REPO/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_object"
+      - name: Build all runtime, Desktop, unified, and Linux Runtime installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=.cache/fork-release/build.json
+          rc=0
+          python3 scripts/release_operator.py build-start \
+            --repo "$RELEASE_REPO" --source-sha "$SOURCE_SHA" --tag "$RELEASE_TAG" \
+            --state-file "$state" --include-unified-installers --include-runtime-installers || rc=$?
+          test "$rc" -eq 0 || test "$rc" -eq 2
+          for attempt in {1..36}; do
+            rc=0
+            python3 scripts/release_operator.py build-status --state-file "$state" --wait-secs 300 || rc=$?
+            if [ "$rc" -eq 0 ]; then exit 0; fi
+            test "$rc" -eq 2
+          done
+          echo 'Candidate build did not finish within the bounded wait' >&2
+          exit 1
+      - name: Collect and verify only the immutable same-run bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=$(python3 -c 'import json; print(json.load(open(".cache/fork-release/build.json"))["run_id"])')
+          python3 scripts/release_operator.py collect \
+            --repo "$RELEASE_REPO" --run-id "$run_id" --source-sha "$SOURCE_SHA" \
+            --tag "$RELEASE_TAG" --output-dir .cache/fork-release/bundle \
+            --require-unified-installers --require-runtime-installers > .cache/fork-release/collection.json
+      - name: Upload a draft, verify every asset digest, then publish a fork prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('.cache/fork-release')
+          s = json.loads((p / 'collection.json').read_text())
+          names = {'SHA256SUMS', 'webcodex-release-manifest.json', 'manifest.json', 'manifest-v2.json'}
+          names.update(s['archive_stem'] + '-' + platform + '.tar.gz' for platform in s['artifacts'])
+          names.update(a['filename'] for a in s['desktop_artifacts'].values())
+          for a in s['installer_artifacts'].values():
+              names.update((a['filename'], a['source_manifest_filename']))
+          for name in names:
+              if Path(name).name != name or not (p / 'bundle' / name).is_file():
+                  raise SystemExit('Missing or unsafe publication asset: ' + name)
+          (p / 'asset-list.txt').write_text(''.join(str(p / 'bundle' / n) + '\n' for n in sorted(names)))
+          notes = f'''Personal build of WebCodex 0.5.0 in GrothKeiran/webcodex-release, not an upstream official release.
+
+          Upstream base: 67126b56ecb635e67f9104e33c11bb9df1e2fa10
+          Exact release source: {os.environ['SOURCE_SHA']}
+          Candidate workflow: https://github.com/{os.environ['RELEASE_REPO']}/actions/runs/{s['workflow_run_id']}
+
+          Includes six-platform Runtime archives, primary Desktop packages, unified installers, and Linux Runtime DEB/RPM. macOS Intel standalone DMG is built by the supplementary workflow after publication.
+
+          macOS uses this fork's persistent self-signed identity; it is not Apple Developer ID signed or notarized. Windows installers are unsigned. No npm publication is performed.
+
+          Every primary asset was verified against the retained same-run bundle before publication. See SHA256SUMS and the source manifests.
+          '''
+          (p / 'release-notes.md').write_text(notes)
+          PY
+          mapfile -t assets < .cache/fork-release/asset-list.txt
+          gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" \
+            --verify-tag --draft --title 'WebCodex v0.5.0 — personal fork build' \
+            --notes-file .cache/fork-release/release-notes.md
+          python3 scripts/release_operator.py verify-draft --repo "$RELEASE_REPO" \
+            --bundle-dir .cache/fork-release/bundle --require-unified-installers --require-runtime-installers
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --draft=false --prerelease --latest=false
+          echo "Release: https://github.com/$RELEASE_REPO/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+      - name: Dispatch the supplemental macOS Intel Desktop build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN-created release events do not recursively start workflows.
+          gh workflow run release-desktop-darwin-x64.yml --repo "$RELEASE_REPO" --ref main -f tag="$RELEASE_TAG"
+      - name: Retain non-secret release evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fork-release-control-${{ github.run_id }}
+          path: |
+            .cache/fork-release/readiness.json
+            .cache/fork-release/build.json
+            .cache/fork-release/collection.json
+          if-no-files-found: ignore
+          retention-days: 7
