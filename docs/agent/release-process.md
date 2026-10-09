@@ -151,6 +151,28 @@ After exact-source CI and source-evidence both succeed, `readiness-start` binds 
 
 After immutable tagging, authoritative `release-build.yml` now starts with a cheap exact-tag preflight that runs the deterministic release/tooling contract before any scarce native matrix. Only that preflight can unlock the six-platform runtime/Desktop jobs. This is intentionally redundant with ordinary PR CI: it fences the exact tagged workflow source so YAML/shell/static packaging drift is rejected in minutes instead of after platform builds have consumed tens of minutes.
 
+### Explicit personal-fork Windows Desktop-only release
+
+The authorized public fork `GrothKeiran/webcodex-release` may request
+`windows_desktop_only=true` from the same authoritative `release-build.yml`.
+This is an explicitly scoped Desktop distribution, not the ordinary core
+Release. Exact-source CI and the complete upstream pre-tag readiness gate remain
+mandatory. The option rejects unified/runtime installer options and verification
+tags, excludes Linux/macOS candidate jobs, and selects only the native Windows
+x64 row. Native runtime version/commit/PE verification, npm installer smoke,
+Desktop staging, and Desktop install/uninstall smoke remain unchanged.
+
+The same-run scoped bundle has exactly the x64 NSIS installer, its checksum,
+`webcodex-desktop-release-manifest.json`, and `SHA256SUMS`. The scoped manifest
+records the immutable annotated tag/source, build request/run, unsigned signing
+mode and distribution scope; it must never be presented as the six-platform
+runtime or unified-installer manifest. Collection validates the exact successful
+tag/request/run and artifact ZIP digest, refuses existing output, and preserves
+all byte checks. `fork-windows-desktop.yml` stages a new draft, requires every
+uploaded asset's GitHub SHA-256 to match, then publishes a clearly identified
+personal-fork prerelease. It does not publish npm/GHCR/Pages or dispatch the macOS
+Intel supplement. Existing tags/assets are never moved or overwritten.
+
 The core Release and distro/unified installers are separate concerns. By default `release-build.yml` produces the six native runtime archives plus the version-appropriate primary Desktop distributions and same-run release metadata. `include_unified_installers=true` is an explicit opt-in extension that additionally builds the Linux DEB/RPM, macOS PKG, Windows unified EXE, source manifests, and installer manifest. A unified-installer failure must not block the ordinary core Release when that option was not requested. The public download-page workflow likewise treats the installer manifest as optional: a core-only Release completes without a download-page artifact, while a present installer manifest is still validated fail-closed.
 
 Starting with `v0.4.3`, the primary build owns macOS Apple-Silicon plus Windows x64/ARM64 Desktop candidates, while macOS Intel Desktop remains a post-publication supplemental workflow so its slow DMG build does not delay the core Release. The `darwin-x64` runtime archive itself remains part of the primary six-platform bundle. Post-publication consumers prefer machine-readable `--build-info-json` over formatting assumptions about `--version`; historical short commit identities may be accepted only when they still identify the exact immutable release source.

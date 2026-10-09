@@ -1193,7 +1193,7 @@ if output.get("session_id") != session_id:
     errors.append("output.session_id must match returned session_id")
 if not isinstance(output.get("workspace"), dict):
     errors.append("output.workspace must exist")
-if not isinstance(changes.get("read_workspace_changes"), dict):
+if not isinstance(changes.get("show_changes"), dict):
     errors.append("output.changes.show_changes must exist")
 if not isinstance(output.get("hygiene"), dict):
     errors.append("output.hygiene must exist")

@@ -43,6 +43,33 @@ printf '%s %s' "$CASE_STRUCTURED_EDIT_CALLS" "$CASE_FAILED_TOOL_CALLS"
 ''')
         self.assertEqual(output, "1 1")
 
+    def test_finish_uses_canonical_show_changes_and_preserves_dirty_file_assertion(self):
+        for key, clean, files, success in (
+            ("show_changes", False, [{"path": "src/lib.rs"}], True),
+            ("read_workspace_changes", False, [{"path": "src/lib.rs"}], False),
+            ("show_changes", True, [{"path": "src/lib.rs"}], False),
+            ("show_changes", False, [{"path": "wrong.rs"}], False),
+        ):
+            with self.subTest(key=key, clean=clean, files=files):
+                body = json.dumps({"success": True, "output": {
+                    "workspace": {"clean": clean}, "changes": {key: {"files": files}}}})
+                output = self.shell("case_ok() { printf ok; }; case_fail() { printf fail; }; "
+                                    + "assert_finish_reports_changed_file '" + body + "'")
+                self.assertEqual(output, "ok" if success else "fail")
+
+    def test_e2e_finish_assertion_accepts_canonical_result_not_the_retired_alias(self):
+        script = (SCRIPT.parent / "e2e_zero_config_ws.sh").read_text()
+        start = script.index('    body="$(runtime_tool_call "finish_coding_task"')
+        code = script[start:].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        for key, success in (("show_changes", True), ("read_workspace_changes", False)):
+            body = json.dumps({"success": True, "output": {
+                "deterministic": True, "llm_summary": False, "session_id": "fixture",
+                "workspace": {}, "changes": {key: {}}, "hygiene": {}, "handoff": {},
+                "validation": {"available": False}, "final_warnings": []}})
+            result = subprocess.run(["python3", "-c", code, body, "fixture"],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode == 0, success)
+
     def test_json_envelope_is_the_api_contract_not_a_guessed_mcp_wrapper(self):
         output = self.shell('json_body edit_project_files \'{"project":"agent:r:p","changes":[]}\'')
         self.assertEqual(json.loads(output), {"tool": "edit_project_files", "params": {"project": "agent:r:p", "changes": []}})

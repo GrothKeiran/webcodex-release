@@ -1,0 +1,237 @@
+name: Fork Windows x64 Desktop release 0.5.0
+run-name: Windows x64 Desktop fork release v0.5.0 from ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-v0.5.0
+  cancel-in-progress: false
+
+env:
+  PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.cache/python
+  TMPDIR: ${{ github.workspace }}/.cache/tmp
+  XDG_CACHE_HOME: ${{ github.workspace }}/.cache/xdg
+  npm_config_cache: ${{ github.workspace }}/.cache/npm
+  RELEASE_REPO: GrothKeiran/webcodex-release
+  RELEASE_TAG: v0.5.0
+  SOURCE_REF: release/v0.5.0
+  SOURCE_SHA: ${{ github.sha }}
+
+jobs:
+  release:
+    if: github.repository == 'GrothKeiran/webcodex-release' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fence the public fork and immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" .cache/fork-release
+          test "$GITHUB_REPOSITORY" = "$RELEASE_REPO"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          import collect_release_bundle as collector
+          c = collector.GitHubClient(os.environ['RELEASE_REPO'], os.environ['GH_TOKEN'], 30)
+          repo = c.fetch_json('')
+          if repo.get('private') is not False or repo.get('fork') is not True or repo.get('parent', {}).get('full_name') != 'yyjeqhc/webcodex':
+              raise SystemExit('Not the authorized public upstream fork')
+          ref = c.fetch_json('/git/ref/heads/' + os.environ['SOURCE_REF'])
+          if ref['object']['sha'] != os.environ['SOURCE_SHA']:
+              raise SystemExit('Release source branch has moved')
+          PY
+          gh api "repos/$RELEASE_REPO/git/matching-refs/tags/$RELEASE_TAG" > .cache/fork-release/tag-refs.json
+          gh api "repos/$RELEASE_REPO/releases?per_page=100" > .cache/fork-release/releases.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('.cache/fork-release')
+          tag = os.environ['RELEASE_TAG']
+          if any(r['ref'] == 'refs/tags/' + tag for r in json.loads((p / 'tag-refs.json').read_text())):
+              raise SystemExit('Tag already exists; never move or replace it')
+          if any(r['tag_name'] == tag for r in json.loads((p / 'releases.json').read_text())):
+              raise SystemExit('Release already exists; never overwrite assets')
+          PY
+      - name: Wait for exact-source CI and release evidence (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, sys, time, urllib.parse
+          sys.path.insert(0, 'scripts')
+          import collect_release_bundle as collector
+          c = collector.GitHubClient(os.environ['RELEASE_REPO'], os.environ['GH_TOKEN'], 30)
+          source, ref = os.environ['SOURCE_SHA'], os.environ['SOURCE_REF']
+          pending = {'ci.yml', 'release-readiness.yml'}
+          deadline = time.monotonic() + 90 * 60
+          while pending:
+              if c.fetch_json('/git/ref/heads/' + ref)['object']['sha'] != source:
+                  raise SystemExit('Release source moved while waiting')
+              for workflow in sorted(pending):
+                  query = urllib.parse.urlencode({'branch': ref, 'head_sha': source, 'event': 'push', 'per_page': 100})
+                  runs = c.fetch_json('/actions/workflows/' + workflow + '/runs?' + query)['workflow_runs']
+                  runs = [r for r in runs if r.get('head_sha') == source and r.get('head_branch') == ref and r.get('event') == 'push' and r.get('path') == '.github/workflows/' + workflow]
+                  if not runs:
+                      continue
+                  run = max(runs, key=lambda r: r['id'])
+                  if run['status'] == 'completed':
+                      if run['conclusion'] != 'success':
+                          raise SystemExit('Required gate failed: ' + run['html_url'])
+                      print('Passed gate: ' + run['html_url'], flush=True)
+                      pending.remove(workflow)
+              if pending:
+                  if time.monotonic() >= deadline:
+                      raise SystemExit('Timed out waiting for exact-source gates')
+                  time.sleep(30)
+          PY
+      - name: Run the upstream pre-tag readiness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=.cache/fork-release/readiness.json
+          rc=0
+          python3 scripts/release_operator.py readiness-start \
+            --repo "$RELEASE_REPO" --source-sha "$SOURCE_SHA" --source-ref "$SOURCE_REF" \
+            --state-file "$state" || rc=$?
+          test "$rc" -eq 0 || test "$rc" -eq 2
+          for attempt in {1..12}; do
+            rc=0
+            python3 scripts/release_operator.py readiness-status --state-file "$state" --wait-secs 300 || rc=$?
+            if [ "$rc" -eq 0 ]; then exit 0; fi
+            test "$rc" -eq 2
+          done
+          echo 'Readiness did not finish within the bounded wait' >&2
+          exit 1
+      - name: Create the annotated tag without replacing an existing ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$RELEASE_REPO/git/ref/heads/$SOURCE_REF" --jq '.object.sha')
+          test "$current" = "$SOURCE_SHA"
+          tag_object=$(gh api --method POST "repos/$RELEASE_REPO/git/tags" \
+            -f tag="$RELEASE_TAG" -f object="$SOURCE_SHA" -f type=commit \
+            -f message="Personal fork build $RELEASE_TAG from $SOURCE_SHA; exact-source CI and release readiness passed." \
+            --jq '.sha')
+          gh api --method POST "repos/$RELEASE_REPO/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_object"
+      - name: Dispatch exactly one Windows x64 Desktop candidate build
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_id="rb_$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+          printf '%s\n' "$request_id" > .cache/fork-release/request-id
+          gh workflow run release-build.yml --repo "$RELEASE_REPO" --ref "$RELEASE_TAG" \
+            -f tag="$RELEASE_TAG" -f request_id="$request_id" \
+            -f windows_desktop_only=true -f include_unified_installers=false -f include_runtime_installers=false
+      - name: Wait for the exact-tag exact-request candidate run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYWAIT'
+          import json, os, sys, time
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import collect_release_bundle as collector
+          import release_publication as publication
+          c = collector.GitHubClient(os.environ['RELEASE_REPO'], os.environ['GH_TOKEN'], 30)
+          request = Path('.cache/fork-release/request-id').read_text().strip()
+          tag, source = os.environ['RELEASE_TAG'], os.environ['SOURCE_SHA']
+          state = {'run_name': f'Release build {tag} {request}', 'source_sha': source, 'run_id': None}
+          deadline = time.monotonic() + 100 * 60
+          while time.monotonic() < deadline:
+              runs = c.fetch_json('/actions/workflows/release-build.yml/runs?event=workflow_dispatch&per_page=100')
+              run = publication.select_build_run(runs, state)
+              if run:
+                  if run.get('head_branch') != tag or run.get('head_sha') != source:
+                      raise SystemExit('Candidate build source mismatch')
+                  if state['run_id'] is not None and run['id'] != state['run_id']:
+                      raise SystemExit('Candidate run changed after binding')
+                  state['run_id'] = run['id']
+                  state['run_attempt'] = run['run_attempt']
+                  Path('.cache/fork-release/build.json').write_text(json.dumps(state, indent=2))
+                  if run['status'] == 'completed':
+                      if run['conclusion'] != 'success':
+                          raise SystemExit('Windows candidate build failed: ' + run['html_url'])
+                      print('Windows candidate passed: ' + run['html_url'])
+                      break
+              time.sleep(30)
+          else:
+              raise SystemExit('Timed out waiting for the Windows candidate build')
+          PYWAIT
+      - name: Collect and verify the same-run scoped bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=$(python3 -c 'import json; print(json.load(open(".cache/fork-release/build.json"))["run_id"])')
+          request_id=$(cat .cache/fork-release/request-id)
+          python3 scripts/windows_desktop_release.py collect \
+            --directory .cache/fork-release/windows-bundle --version 0.5.0 \
+            --repo "$RELEASE_REPO" --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
+            --run-id "$run_id" --request-id "$request_id" > .cache/fork-release/collection.json
+      - name: Stage a draft and verify every uploaded byte before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle=.cache/fork-release/windows-bundle
+          cat > .cache/fork-release/notes.md <<EOF
+          ## Windows x64 Desktop only / 仅 Windows x64 桌面版
+          - Version: 0.5.0; exact source: $SOURCE_SHA
+          - Personal public fork of yyjeqhc/webcodex, not an official upstream release.
+          - Intel/AMD 64-bit Windows; not ARM64 and not 32-bit Windows.
+          - Includes the Cloudflare fixed-tunnel implementation from commit c2ed80d9.
+          - Unsigned NSIS desktop installer; Windows may display a SmartScreen warning.
+          - Exact-source CI/readiness, native runtime identity/PE checks, and desktop install/uninstall smoke passed.
+          - Same-run scoped provenance and SHA-256 checksums are attached. This is not the six-platform runtime or unified-installer release and intentionally has no full updater/installer manifest.
+          EOF
+          gh release create "$RELEASE_TAG" "$bundle"/* --repo "$RELEASE_REPO" \
+            --verify-tag --draft --title 'WebCodex 0.5.0 — Windows x64 Desktop (personal fork)' \
+            --notes-file .cache/fork-release/notes.md
+          run_id=$(python3 -c 'import json; print(json.load(open(".cache/fork-release/build.json"))["run_id"])')
+          request_id=$(cat .cache/fork-release/request-id)
+          python3 scripts/windows_desktop_release.py verify-draft \
+            --directory "$bundle" --version 0.5.0 --repo "$RELEASE_REPO" \
+            --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" --run-id "$run_id" \
+            --request-id "$request_id" > .cache/fork-release/draft-verification.json
+      - name: Publish only the verified Windows x64 Desktop prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id=$(python3 -c 'import json; print(json.load(open(".cache/fork-release/draft-verification.json"))["release_id"])')
+          gh api --method PATCH "repos/$RELEASE_REPO/releases/$release_id" \
+            -F draft=false -F prerelease=true -f make_latest=false --jq '{html_url,draft,prerelease}'
+          {
+            echo '### Windows x64 Desktop release published'
+            echo "- source: \`$SOURCE_SHA\`"
+            echo "- release: https://github.com/$RELEASE_REPO/releases/tag/$RELEASE_TAG"
+            echo '- only the x64 Desktop installer, scoped provenance and checksums were uploaded'
+            echo '- no npm, GHCR, Pages, ARM or macOS/Linux release publication'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep non-secret publication-control evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fork-windows-x64-release-control-${{ github.run_id }}
+          path: |
+            .cache/fork-release/readiness.json
+            .cache/fork-release/build.json
+            .cache/fork-release/collection.json
+            .cache/fork-release/draft-verification.json
+          if-no-files-found: ignore
+          retention-days: 7

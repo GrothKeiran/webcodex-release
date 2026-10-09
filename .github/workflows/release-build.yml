@@ -14,6 +14,11 @@ on:
         required: false
         default: manual
         type: string
+      windows_desktop_only:
+        description: Build only Windows x64 Desktop (scoped fork release, no full release manifest)
+        required: false
+        default: false
+        type: boolean
       include_runtime_installers:
         description: Build Linux Runtime DEB/RPM installers (requires unified installers and a release tag)
         required: false
@@ -56,10 +61,17 @@ jobs:
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          WINDOWS_DESKTOP_ONLY: ${{ inputs.windows_desktop_only }}
           INCLUDE_RUNTIME_INSTALLERS: ${{ inputs.include_runtime_installers }}
           INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}
         run: |
           set -euo pipefail
+          if [ "${WINDOWS_DESKTOP_ONLY:-false}" = true ]; then
+            test "$GITHUB_REPOSITORY" = GrothKeiran/webcodex-release
+            test "$INCLUDE_RUNTIME_INSTALLERS" = false
+            test "$INCLUDE_UNIFIED_INSTALLERS" = false
+            [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          fi
           if [ "${INCLUDE_RUNTIME_INSTALLERS:-false}" = true ]; then
             test "$INCLUDE_UNIFIED_INSTALLERS" = true
             [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -73,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      windows_matrix: ${{ steps.metadata.outputs.windows_matrix }}
       version: ${{ steps.metadata.outputs.version }}
       source_sha: ${{ steps.metadata.outputs.source_sha }}
       built_at: ${{ steps.metadata.outputs.built_at }}
@@ -118,6 +131,7 @@ jobs:
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          WINDOWS_DESKTOP_ONLY: ${{ inputs.windows_desktop_only }}
         run: |
           set -euo pipefail
           tag="$INPUT_TAG"
@@ -192,6 +206,13 @@ jobs:
           fi
 
           {
+            python3 - <<'PYMATRIX'
+          import json, os
+          rows = [{"platform": "win32-x64", "runner": "windows-latest", "rust_target": "x86_64-pc-windows-msvc", "processor_architecture": "AMD64", "pe_machine": "8664", "node_architecture": "x64"}]
+          if os.environ.get("WINDOWS_DESKTOP_ONLY") != "true":
+              rows.append({"platform": "win32-arm64", "runner": "windows-11-arm", "rust_target": "aarch64-pc-windows-msvc", "processor_architecture": "ARM64", "pe_machine": "AA64", "node_architecture": "arm64"})
+          print("windows_matrix=" + json.dumps({"include": rows}, separators=(",", ":")))
+          PYMATRIX
             echo "version=$version"
             echo "source_sha=$source_sha"
             echo "built_at=$built_at"
@@ -210,6 +231,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   linux:
+    if: ${{ !inputs.windows_desktop_only }}
     needs: prepare
     strategy:
       fail-fast: false
@@ -387,6 +409,7 @@ jobs:
           compression-level: 0
 
   macos:
+    if: ${{ !inputs.windows_desktop_only }}
     needs: prepare
     strategy:
       fail-fast: false
@@ -634,20 +657,7 @@ jobs:
     needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: win32-x64
-            runner: windows-latest
-            rust_target: x86_64-pc-windows-msvc
-            processor_architecture: AMD64
-            pe_machine: "8664"
-            node_architecture: x64
-          - platform: win32-arm64
-            runner: windows-11-arm
-            rust_target: aarch64-pc-windows-msvc
-            processor_architecture: ARM64
-            pe_machine: "AA64"
-            node_architecture: arm64
+      matrix: ${{ fromJSON(needs.prepare.outputs.windows_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -1318,7 +1328,7 @@ jobs:
   assemble:
     needs: [prepare, linux, macos, windows, unified-native, runtime-native]
     if: >-
-      always() &&
+      always() && !inputs.windows_desktop_only &&
       needs.prepare.result == 'success' &&
       needs.linux.result == 'success' &&
       needs.macos.result == 'success' &&
@@ -1756,6 +1766,43 @@ jobs:
         with:
           name: ${{ needs.prepare.outputs.archive_stem }}-bundle
           path: release-bundle/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  assemble-windows-desktop:
+    needs: [prepare, windows]
+    if: inputs.windows_desktop_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      BUILT_AT: ${{ needs.prepare.outputs.built_at }}
+      INPUT_TAG: ${{ inputs.tag }}
+      REQUEST_ID: ${{ inputs.request_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.archive_stem }}-desktop-win32-x64
+          path: desktop-candidate
+      - name: Assemble only the same-run verified Windows x64 Desktop installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 scripts/windows_desktop_release.py assemble \
+            --directory desktop-candidate --version "$VERSION" --tag "$INPUT_TAG" \
+            --source-sha "$SOURCE_SHA" --built-at "$BUILT_AT" \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" --request-id "$REQUEST_ID"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: webcodex-desktop-v${{ needs.prepare.outputs.version }}-win32-x64-bundle
+          path: desktop-candidate/*
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
