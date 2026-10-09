@@ -143,6 +143,7 @@ class PrepareReleaseMetadataInstallerTests(unittest.TestCase):
         env = {**os.environ, "METADATA_SCRIPT": str(metadata.ROOT / "scripts/prepare_release_metadata.py"),
                "ARTIFACT_DIR": str(self.artifacts), "OUTPUT_DIR": str(self.output),
                "PACKAGE_JSON": str(self.package), "VERSION": "0.3.0", "SOURCE_SHA": "a" * 40,
+               "GITHUB_REPOSITORY": "GrothKeiran/webcodex-release",
                "GITHUB_RUN_ID": "123", "GITHUB_WORKFLOW_REF": "repo/.github/workflows/release-build.yml@refs/tags/v0.3.0"}
         for include in (False, True):
             with self.subTest(include=include):
@@ -155,6 +156,18 @@ class PrepareReleaseMetadataInstallerTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn("installers", json.loads((self.output / "manifest.json").read_text()))
+                    manifest = json.loads((self.output / "manifest.json").read_text())
+                    self.assertTrue(all(item["url"].startswith("https://github.com/GrothKeiran/webcodex-release/releases/")
+                                        for item in manifest["artifacts"].values()))
+
+    def test_generates_unified_metadata_for_explicit_fork_repository(self):
+        self.write_installers()
+        result = self.prepare("--repo", "GrothKeiran/webcodex-release", "--require-unified-installers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.output / "manifest.json").read_text())
+        prefix = "https://github.com/GrothKeiran/webcodex-release/releases/download/v0.3.0/"
+        for group in ("artifacts", "installers"):
+            self.assertTrue(all(item["url"].startswith(prefix) for item in manifest[group].values()))
 
     def test_rejects_partial_unified_installer_set(self):
         path = self.artifacts / metadata.installer_filename("0.3.0", next(iter(metadata.INSTALLER_TARGETS)))

@@ -1574,6 +1574,7 @@ jobs:
             python3 scripts/prepare_release_metadata.py \
               "${metadata_options[@]}" \
               --version "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
               --source-sha "$SOURCE_SHA" \
               --workflow-run-id "$GITHUB_RUN_ID" \
               --workflow-ref "$GITHUB_WORKFLOW_REF" \
